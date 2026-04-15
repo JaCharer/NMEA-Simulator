@@ -1,0 +1,85 @@
+<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>
+<title>Konfiguracja</title>
+<style>
+  body{font-family:Arial;background:#1e1e1e;color:#ddd;text-align:center;}
+  .card{background:#2d2d2d;padding:25px;border-radius:12px;margin:15px auto;max-width:460px;}
+  .btn{padding:12px 28px;margin:10px;border:none;border-radius:6px;color:white;font-weight:bold;cursor:pointer;font-size:16px;}
+  .blue{background:#007BFF;}.green{background:#28a745;}.red{background:#dc3545;}
+  input[type=text],input[type=password]{width:100%;padding:12px;margin:8px 0;border-radius:6px;border:1px solid #555;background:#3a3a3a;color:white;}
+  label{font-size:17px;margin:8px 0;display:block;}
+  table{width:100%;border-collapse:collapse;margin:15px 0;}
+  th,td{padding:10px;text-align:left;border-bottom:1px solid #444;}
+</style>
+</head><body>
+<h2>⚙️ Konfiguracja Symulatora</h2>
+<div class='card'>
+  <h3>Połączenie WiFi</h3>
+  <button class='btn blue' onclick='scanWiFi()'>Skanuj sieci WiFi</button>
+  <div id='networks' style='margin-top:15px;'></div>
+  <label>Wybrana sieć (SSID):</label><input type='text' id='ssid' placeholder='SSID' readonly>
+  <label>Hasło:</label><input type='password' id='password' placeholder='Hasło do sieci'>
+  <label><input type='checkbox' id='ap_chk'> Uruchom w trybie Access Point</label>
+  <button class='btn green' style='width:100%; margin: 15px 0 0 0;' onclick='saveWiFi()'>ZAPISZ WIFI I RESTART</button>
+</div>
+<div class='card'>
+  <h3>Ustawienia transmisji (Zapisywane automatycznie)</h3>
+  <label><input type='checkbox' id='chk_u' onchange='updateSettings()'> Włącz UDP</label><br>
+  <label><input type='checkbox' id='chk_t' onchange='updateSettings()'> Włącz TCP</label><br>
+  <label><input type='checkbox' id='chk_d' onchange='updateSettings()'> Włącz DEBUG</label><br><br>
+  Interwał wysyłania: <input type='number' id='in_i' min='1' max='10' value='1' style='width:80px' onchange='updateSettings()'> sekund
+</div>
+<button class='btn red' onclick="window.location='/'">Powrót do Mostka</button>
+
+<script>
+function scanWiFi() {
+  fetch('/scan').then(r => r.json()).then(networks => {
+    let html = "<table><tr><th>SSID</th><th>Siła</th><th></th></tr>";
+    networks.forEach(net => {
+      html += `<tr><td>${net.ssid}</td><td>${net.rssi} dBm</td><td><button onclick="selectNetwork('${net.ssid}')">Wybierz</button></td></tr>`;
+    });
+    html += "</table>";
+    document.getElementById('networks').innerHTML = html;
+  });
+}
+function selectNetwork(ssid) { document.getElementById('ssid').value = ssid; }
+
+// NOWA FUNKCJA: Błyskawiczny zapis ustawień w tle
+function updateSettings() {
+  const u = document.getElementById('chk_u').checked ? 1 : 0;
+  const t = document.getElementById('chk_t').checked ? 1 : 0;
+  const d = document.getElementById('chk_d').checked ? 1 : 0;
+  const i = document.getElementById('in_i').value || 1;
+  fetch(`/settings?u=${u}&t=${t}&d=${d}&i=${i}`);
+}
+
+// ZMIENIONA FUNKCJA: Wysyła tylko dane WiFi
+function saveWiFi() {
+  fetch('/saveconfig', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      ssid: document.getElementById('ssid').value,
+      pass: document.getElementById('password').value,
+      ap: document.getElementById('ap_chk').checked
+    })
+  })
+  .then(response => response.text())
+  .then(text => {
+    alert(text);
+    if (text.includes("restart") || text.includes("restartu")) {
+      setTimeout(() => location.href = '/', 4000);
+    }
+  })
+  .catch(err => alert("Błąd zapisu: " + err));
+}
+
+window.onload = () => {
+  fetch('/data').then(r=>r.json()).then(d => {
+    document.getElementById('chk_u').checked = d.u;
+    document.getElementById('chk_t').checked = d.t;
+    document.getElementById('chk_d').checked = d.d;
+    document.getElementById('in_i').value = d.i || 1;
+  });
+};
+</script>
+</body></html>

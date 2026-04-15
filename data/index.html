@@ -1,0 +1,128 @@
+<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>
+<style>
+  body{font-family:Arial; background:#1e1e1e; color:#fff; text-align:center;}
+  .card{background:#2d2d2d; padding:20px; border-radius:10px; display:inline-block; margin:10px; min-width:300px; vertical-align:top;}
+  /* Dodano user-select: none; aby szybkie klikanie nie zaznaczało tekstu! */
+  .btn{padding:15px 5px; border-radius:5px; border:none; color:white; cursor:pointer; font-weight:bold; margin:3px; user-select: none; -webkit-user-select: none;}
+  .blue{background:#007BFF;} .red{background:#dc3545;} .green{background:#28a745;} .mag{background:#d63384;}
+  .slider{width: 100%; margin-top:10px;}
+</style></head>
+<body><h2>Mostek Kapitański</h2>
+<p><button class='btn blue' style='margin:10px;padding:10px 20px;' onclick="window.location='/config'">⚙️ KONFIGURACJA WIFI</button></p>
+<div class='card'>
+  <h3>COG: <span id='c'>--</span>&deg;</h3>
+  <h4 style='color:#aaa; margin-top:-10px; margin-bottom:15px;'>SOG: <span id='s'>--</span> kn (Cel: <span id='ts'>--</span> kn)</h4>
+  
+  <button class='btn red' style='width:50px;' onclick="sendCmd('L10')">-10&deg;</button>
+  <button class='btn red' style='width:45px;' onclick="sendCmd('L1')">-1&deg;</button>
+  <button class='btn mag' style='width:60px;' onclick="sendCmd('NAV')">NAV</button>
+  <button class='btn green' style='width:45px;' onclick="sendCmd('R1')">+1&deg;</button>
+  <button class='btn green' style='width:50px;' onclick="sendCmd('R10')">+10&deg;</button>
+</div>
+<div class='card'>
+  <h3>Silnik: <span id='rpm_disp'>0</span> RPM</h3>
+  <label style='font-size:18px; font-weight:bold;'><input type='checkbox' id='eng_sw' onchange='sndEng()' style='transform: scale(1.5); margin-right:10px;'> WŁĄCZ</label><br><br>
+  Moc: <input type='range' id='rpm_sld' min='900' max='4000' value='900' class='slider' onchange='sndEng()' oninput="updateRpmDisp()">
+</div><br>
+<div class='card'><h3>Autopilot: <span id='nav_stat'>--</span></h3></div>
+
+<script>
+  let ws;
+  let lastUserInteraction = 0;
+
+  function initWebSocket() {
+    ws = new WebSocket('ws://' + window.location.hostname + '/ws');
+    
+    ws.onmessage = function(event) {
+      const d = JSON.parse(event.data);
+      const timeSinceInteraction = Date.now() - lastUserInteraction;
+      
+      const eng_sw = document.getElementById('eng_sw');
+      const slider = document.getElementById('rpm_sld');
+      const disp   = document.getElementById('rpm_disp');
+
+      // BLOKADA "GUMKI": Aktualizujemy ekran danymi z serwera tylko, 
+      // jeśli użytkownik przez ostatnie 800ms niczego nie klikał.
+      if (timeSinceInteraction > 800) {  
+        document.getElementById('c').innerText = d.c.toFixed(1);
+        
+        // NOWE: Aktualizacja wyświetlania SOG i Target SOG
+        if (d.s !== undefined) document.getElementById('s').innerText = d.s.toFixed(1);
+        if (d.ts !== undefined) document.getElementById('ts').innerText = d.ts.toFixed(1);
+
+        document.getElementById('nav_stat').innerText = (d.n ? 'AKTYWNY' : 'STANDBY');
+          
+        if (d.e === 1) {           
+          eng_sw.checked = true;          
+          disp.innerText = Math.round(d.r);
+          slider.value = Math.round(d.r); 
+        } else {
+          eng_sw.checked = false;
+          disp.innerText = '0';
+          slider.value = 900;
+        }
+      }
+    };
+
+    ws.onclose = function(e) {
+      console.log('Rozłączono WS. Próba wznowienia...', e.reason);
+      setTimeout(function() { initWebSocket(); }, 2000);
+    };
+  }
+
+  function sendCmd(cmd) {
+    if(ws && ws.readyState === WebSocket.OPEN) {
+      lastUserInteraction = Date.now(); // Blokuje nadpisywanie cyfr starymi pakietami!
+      ws.send(cmd);
+      
+      // === NATYCHMIASTOWA REAKCJA UI (Optimistic Update) ===
+      let cSpan = document.getElementById('c');
+      let currentCog = parseFloat(cSpan.innerText);
+      if (isNaN(currentCog)) currentCog = 0;
+      
+      if (!isNaN(currentCog)) {
+        if (cmd === 'L10') currentCog -= 10;
+        else if (cmd === 'L1')  currentCog -= 1;
+        else if (cmd === 'R1')  currentCog += 1;
+        else if (cmd === 'R10') currentCog += 10;
+        
+        // Zwijanie kątów 0-360
+        if (currentCog < 0) currentCog += 360;
+        if (currentCog >= 360) currentCog -= 360;
+        
+        if (cmd !== 'NAV') {
+           cSpan.innerText = currentCog.toFixed(1);
+           document.getElementById('nav_stat').innerText = 'STANDBY';
+        } else {
+           let stat = document.getElementById('nav_stat');
+           stat.innerText = (stat.innerText === 'AKTYWNY') ? 'STANDBY' : 'AKTYWNY';
+        }
+      }
+    }
+  }
+
+  // Funkcja optycznego odświeżania suwaka (żeby cyferki zmieniały się podczas przesuwania)
+  function updateRpmDisp() {
+    lastUserInteraction = Date.now();
+    const checked = document.getElementById('eng_sw').checked;
+    document.getElementById('rpm_disp').innerText = checked ? document.getElementById('rpm_sld').value : '0';
+  }
+
+  function sndEng() {
+    lastUserInteraction = Date.now();
+    const checked = document.getElementById('eng_sw').checked;
+    const slider  = document.getElementById('rpm_sld');
+    const st = checked ? 1 : 0;
+    let r = slider.value;
+    
+    if (!checked) {
+      r = 900;
+      slider.value = 900;
+    }
+    document.getElementById('rpm_disp').innerText = checked ? r : '0';
+    ws.send(`ENG:${st}:${r}`);
+  }
+
+  window.onload = initWebSocket;
+</script>
+</body></html>
