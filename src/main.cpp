@@ -1,6 +1,6 @@
 // =========================================================================
 // SYMULATOR MOSTKA KAPITAŃSKIEGO NMEA / AIS
-// Wersja: 2.1 (Pełna konfiguracja WiFi + poprawiony RPM dla OpenCPN)
+// Wersja: 2.2 (Pełna konfiguracja WiFi + poprawiony RPM dla OpenCPN)
 // =========================================================================
 
 #include <Arduino.h>
@@ -867,10 +867,10 @@ void setup() {
                 wifi_ssid.c_str(), useAP_mode?"TAK":"NIE", debug_mode?"TAK":"NIE", sendInterval);
 
   #ifdef STEADY_WIND_FOR_TESTS
-    target_wind_speed = 15.0;
-    target_wind_dir = 0.0;
-    true_wind_speed = 15.0;
-    true_wind_dir = 0.0;
+    target_wind_speed = STEADY_WIND_SPEED;
+    target_wind_dir = STEADY_WIND_DIR;
+    true_wind_speed = target_wind_speed;
+    true_wind_dir = target_wind_dir;
   #else
     target_wind_speed = random(40, 270) / 10.0;
     target_wind_dir = random(0, 360);
@@ -1067,11 +1067,11 @@ void loop() {
     }
 
     #ifdef STEADY_WIND_FOR_TESTS
-      // Stały wiatr: 0° i 15 kn
-      l_tgt_ws = 15.0;
-      l_tgt_wd = 0.0;
-      l_tws = 15.0;
-      l_twd = 0.0;
+      // Stały wiatr: używamy wartości z platformio.ini
+      l_tgt_ws = STEADY_WIND_SPEED;
+      l_tgt_wd = STEADY_WIND_DIR;
+      l_tws = STEADY_WIND_SPEED;
+      l_twd = STEADY_WIND_DIR;
     #else
       // KROK 3: Obliczenia w tle (bez blokowania)
       if (random(0, 15) == 0) {
