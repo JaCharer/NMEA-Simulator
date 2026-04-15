@@ -6,9 +6,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
-//#include <WebServer.h>
 #include <Preferences.h>
-#include <TFT_eSPI.h> 
+#ifdef USE_LCD
+#include <TFT_eSPI.h>
+#endif
 #include <math.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -33,9 +34,12 @@ String getTimestamp() {
 }
 
 // --- KONFIGURACJA SPRZĘTU ---
+// Definiuj piny tylko jeśli używamy LCD i klawiszy
+#ifdef USE_LCD
 #define BTN_LEFT  0
 #define BTN_RIGHT 35
 #define TFT_BL    4
+#endif
 //#define TOUCH_CS  -1 // TTGO T-Display nie ma dedykowanego pinu CS dla ekranu dotykowego, więc ustawiamy na -1
 #define MAX_TCP_CLIENTS 3
 WiFiClient tcpClients[MAX_TCP_CLIENTS];
@@ -55,11 +59,13 @@ const long  gmtOffset_sec = 0;      // UTC = 0
 const int   daylightOffset_sec = 0; // W UTC nie ma czasu letniego
 
 
+#ifdef USE_LCD
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite sprSOG = TFT_eSprite(&tft);
 TFT_eSprite sprCOG = TFT_eSprite(&tft);
 TFT_eSprite sprInfo = TFT_eSprite(&tft);
 TFT_eSprite sprStat = TFT_eSprite(&tft);
+#endif
 
 Preferences preferences;
 TaskHandle_t GUITask;
@@ -258,6 +264,8 @@ bool checkCollisionRisk_ARPA(float lat1, float lon1, float sog1, float cog1,
 // =========================================================================
 // EKRAN TFT i GUI
 // =========================================================================
+
+#ifdef USE_LCD
 void initDisplayStatic() { 
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(1); tft.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -304,7 +312,10 @@ void updateDisplay() {
   sprStat.print(l_nav ? "NAVI" : "MAN."); 
   sprStat.pushSprite(2, 175);
 }
+#endif
 
+
+#if defined(USE_LCD) && defined(USE_BUTTONS)
 void guiTaskCode(void * pvParameters) {
   initDisplayStatic(); updateDisplay();
   bool lastL = HIGH, lastR = HIGH;
@@ -405,6 +416,7 @@ void guiTaskCode(void * pvParameters) {
     vTaskDelay(5 / portTICK_PERIOD_MS);
   }
 }
+#endif
 
 
 // =========================================================================
@@ -822,13 +834,16 @@ void setup() {
   // --- INICJALIZACJA MUTEXA DANYCH ---
   dataMutex = xSemaphoreCreateMutex();
   
-  // --- INICJALIZACJA TFT ---
+  // --- INICJALIZACJA TFT I KLAWISZY ---
+#ifdef USE_LCD
   pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
   tft.init(); tft.setRotation(0); 
-  pinMode(BTN_LEFT, INPUT_PULLUP); pinMode(BTN_RIGHT, INPUT); 
-
   sprSOG.createSprite(100, 30); sprCOG.createSprite(100, 30);
   sprInfo.createSprite(130, 32); sprStat.createSprite(130, 12);
+#endif
+#ifdef USE_BUTTONS
+  pinMode(BTN_LEFT, INPUT_PULLUP); pinMode(BTN_RIGHT, INPUT); 
+#endif
 
   //preferences.clear();   // odkomentuj tylko raz, żeby wyczyścić stare dane
 
@@ -851,10 +866,17 @@ void setup() {
   Serial.printf("SSID: '%s' | AP: %s | Debug: %s | Interval: %d s\n", 
                 wifi_ssid.c_str(), useAP_mode?"TAK":"NIE", debug_mode?"TAK":"NIE", sendInterval);
 
-  target_wind_speed = random(40, 270) / 10.0; 
-  target_wind_dir = random(0, 360);
-  true_wind_speed = target_wind_speed; 
-  true_wind_dir = target_wind_dir;
+  #ifdef STEADY_WIND_FOR_TESTS
+    target_wind_speed = 15.0;
+    target_wind_dir = 0.0;
+    true_wind_speed = 15.0;
+    true_wind_dir = 0.0;
+  #else
+    target_wind_speed = random(40, 270) / 10.0;
+    target_wind_dir = random(0, 360);
+    true_wind_speed = target_wind_speed;
+    true_wind_dir = target_wind_dir;
+  #endif
 
   // --- LOGIKA POŁĄCZENIA WIFI ---
   if (useAP_mode || wifi_ssid.length() == 0) {
@@ -922,7 +944,9 @@ void setup() {
   esp_task_wdt_init(10, true);        // 10 sekund timeout
   esp_task_wdt_add(NULL);             // dodaje bieżący task (loop)
 
+  #if defined(USE_LCD) && defined(USE_BUTTONS)
   xTaskCreatePinnedToCore(guiTaskCode, "GUITask", 12288, NULL, 1, &GUITask, 0); 
+  #endif
 }
 
 
@@ -998,14 +1022,14 @@ void loop() {
   // === 4. Fizyka + wysyłanie NMEA – tylko co sendInterval sekund ===
   if (millis() - lastTick >= (unsigned long)(sendInterval * 1000)) {
     lastTick = millis();
-    
+
     // --- Czas i data UTC ---
     time_t nowTime;
     struct tm timeinfo;
     time(&nowTime);
-    gmtime_r(&nowTime, &timeinfo); 
+    gmtime_r(&nowTime, &timeinfo);
 
-    char timeBuf[16]; 
+    char timeBuf[16];
     strftime(timeBuf, sizeof(timeBuf), "%H%M%S.00", &timeinfo);
     char dateBuf[8];
     strftime(dateBuf, sizeof(dateBuf), "%d%m%y", &timeinfo);
@@ -1039,27 +1063,35 @@ void loop() {
       l_interval = sendInterval;
       l_udp = enableUDP;               l_tcp = enableTCP;
       l_dbg = debug_mode;
-      xSemaphoreGive(dataMutex); 
+      xSemaphoreGive(dataMutex);
     }
 
-    // KROK 3: Obliczenia w tle (bez blokowania)
-    if (random(0, 15) == 0) { 
-      l_tgt_ws += random(-30, 31) / 10.0; 
-      l_tgt_ws = constrain(l_tgt_ws, 4.0, 35.0);
-      l_tgt_wd += random(-15, 16); 
-      if (l_tgt_wd >= 360.0) l_tgt_wd -= 360.0; 
-      if (l_tgt_wd < 0.0) l_tgt_wd += 360.0;
-    }
-    
-    l_tws += (l_tgt_ws - l_tws) * 0.1;
-    float dir_diff = l_tgt_wd - l_twd;
-    if (dir_diff > 180.0) dir_diff -= 360.0; 
-    if (dir_diff < -180.0) dir_diff += 360.0;
-    if (abs(dir_diff) > 0.5) { 
-      l_twd += dir_diff * 0.05; 
-      if (l_twd >= 360.0) l_twd -= 360.0; 
-      if (l_twd < 0.0) l_twd += 360.0; 
-    }
+    #ifdef STEADY_WIND_FOR_TESTS
+      // Stały wiatr: 0° i 15 kn
+      l_tgt_ws = 15.0;
+      l_tgt_wd = 0.0;
+      l_tws = 15.0;
+      l_twd = 0.0;
+    #else
+      // KROK 3: Obliczenia w tle (bez blokowania)
+      if (random(0, 15) == 0) {
+        l_tgt_ws += random(-30, 31) / 10.0;
+        l_tgt_ws = constrain(l_tgt_ws, 4.0, 35.0);
+        l_tgt_wd += random(-15, 16);
+        if (l_tgt_wd >= 360.0) l_tgt_wd -= 360.0;
+        if (l_tgt_wd < 0.0) l_tgt_wd += 360.0;
+      }
+
+      l_tws += (l_tgt_ws - l_tws) * 0.1;
+      float dir_diff = l_tgt_wd - l_twd;
+      if (dir_diff > 180.0) dir_diff -= 360.0;
+      if (dir_diff < -180.0) dir_diff += 360.0;
+      if (abs(dir_diff) > 0.5) {
+        l_twd += dir_diff * 0.05;
+        if (l_twd >= 360.0) l_twd -= 360.0;
+        if (l_twd < 0.0) l_twd += 360.0;
+      }
+    #endif
 
     if (random(0, 10) == 0) l_tgt_depth = random(20, 800) / 10.0;
     l_depth += (l_tgt_depth - l_depth) * 0.05;      
@@ -1152,8 +1184,7 @@ void loop() {
 
     // $WIMWV – Wiatr pozorny (Apparent Wind) – najważniejszy dla żeglarzy
     // Kąt i prędkość wiatru względem jachtu
-    //sprintf(baseLine, "$WIMWV,%.1f,R,%.1f,N,A", awa, aws);
-    sprintf(baseLine, "$WIMWV,%.1f,R,%.1f,N,A", 0, 15); // staly wiatr dla testow 
+    sprintf(baseLine, "$WIMWV,%.1f,R,%.1f,N,A", awa, aws);
     addNMEAChecksumToLine(baseLine, finalLine); 
     offset += snprintf(pack + offset, sizeof(pack) - offset, "%s", finalLine);
 
@@ -1422,7 +1453,7 @@ void loop() {
         if (strlen(line) > 0) {
           Serial.print(ts);
           Serial.print(" ");
-          Serial.println(line);
+          Serial.print(line);
         }
         if (!next) break;
         line = next + 1;
