@@ -1,242 +1,346 @@
 #include <Arduino.h>
+#include "ais.h"
+#include "arpa.h"
+#include "NMEA0183.h"
+#include "config.h"
 
-// =========================================================================
-// ZMIENNE GLOBALNE I STRUKTURY
-// =========================================================================
-
-// Struktura bufora dla wiadomości wieloczęściowych (zabezpiecza przed przeplataniem)
-#define MAX_BUFFERS 4
-struct AisMultipart {
-    int msgId;
-    char channel; // 'A' lub 'B'
-    String payload;
-    unsigned long timestamp; // Do usuwania starych, niepełnych wiadomości
+// Definicja tablicy targets (przeniesiona z nagłówka, by uniknąć błędów multiple definition)
+Target targets[3] = {
+    {1, 55.5500, 18.0500, 210.0, 16.0, "PROM", 15.0, 16.0, 24.0, false, 210.0, 210.0, false, 0, 1.5, "", ""},
+    {2, 55.4500, 17.9500, 45.0, 10.0, "TANKOWIEC", 20.0, 10.0, 15.0, false, 45.0, 45.0, false, 0, 0.2, "", ""},
+    {3, 55.5000, 18.1000, 0.0, 0.0, "RYBAK", 6.0, 0.0, 12.0, false, 0.0, 0.0, false, 0, 4.0, "", ""}
 };
-AisMultipart mpBuffers[MAX_BUFFERS];
 
-// =========================================================================
-// FUNKCJE POMOCNICZE (OPERACJE BITOWE ZAMIAST STRINGÓW - OSZCZĘDNOŚĆ RAMU!)
-// =========================================================================
 
-// Dekoduje pojedynczy znak AIS na 6-bitową wartość
-uint8_t decode6bit(char c) {
-    uint8_t val = c - 0x30;
-    if (val > 40) val -= 8;
-    return val & 0x3F;
-}
-
-// Magiczna funkcja: Wyciąga dowolną ilość bitów (max 32) prosto z tablicy znaków!
-uint32_t getBits(const char* payload, int startBit, int numBits) {
-    uint32_t result = 0;
-    for (int i = 0; i < numBits; i++) {
-        int bitPos = startBit + i;
-        int charIdx = bitPos / 6;
-        int bitInChar = 5 - (bitPos % 6); // MSB to bit 5
-        
-        if (payload[charIdx] == 0) break; // Koniec łańcucha
-        
-        uint8_t cVal = decode6bit(payload[charIdx]);
-        uint8_t bitVal = (cVal >> bitInChar) & 0x01;
-        result = (result << 1) | bitVal;
+class FastAISBitWriter {
+private:
+    uint8_t payload[40];
+    int bitIndex;
+public:
+    FastAISBitWriter() {
+        memset(payload, 0, sizeof(payload));
+        bitIndex = 0;
     }
-    return result;
-}
-
-// To samo co wyżej, ale dla wartości ujemnych (np. współrzędne geograficzne)
-long getSignedBits(const char* payload, int startBit, int numBits) {
-    uint32_t val = getBits(payload, startBit, numBits);
-    if (val & (1UL << (numBits - 1))) { // Sprawdzamy bit znaku
-        uint32_t mask = ~0UL << numBits;
-        return (long)(val | mask);
-    }
-    return (long)val;
-}
-
-// Wyciąga zdekodowany tekst ASCII prosto z bitów
-String getAisString(const char* payload, int startBit, int numChars) {
-    String result = "";
-    for (int i = 0; i < numChars; i++) {
-        uint8_t val = getBits(payload, startBit + i * 6, 6);
-        char c = (val < 32) ? (val + 64) : val;
-        if (c != '@') result += c; // Pomijamy padding AIS
-    }
-    result.trim(); // Usuwamy spacje na końcu
-    return result;
-}
-
-// Walidacja sumy kontrolnej NMEA
-bool validateChecksum(const String& nmeaLine) {
-    int asterisk = nmeaLine.lastIndexOf('*');
-    if (asterisk < 1 || asterisk + 2 >= nmeaLine.length()) return false;
-    
-    uint8_t calculated = 0;
-    for (int i = 1; i < asterisk; i++) {
-        calculated ^= nmeaLine[i];
-    }
-    
-    long provided = strtol(nmeaLine.substring(asterisk + 1, asterisk + 3).c_str(), nullptr, 16);
-    return calculated == provided;
-}
-
-// Deklaracje funkcji dekodujących
-void decodeAIS_Type1(const char* payload);
-void decodeAIS_Type5(const char* payload);
-void decodeAIS_Type18(const char* payload);
-void decodeAIS_Type24(const char* payload);
-
-
-// =========================================================================
-// GŁÓWNY WRAPPER ODBIORCZY NMEA
-// =========================================================================
-void processNMEALine(String nmeaLine) {
-    if (!nmeaLine.startsWith("!AIVDM") && !nmeaLine.startsWith("!AIVDO")) return;
-
-    // --- KROK 1: Bezpieczeństwo (Checksum) ---
-    if (!validateChecksum(nmeaLine)) {
-        Serial.println("[BŁĄD] Odrzucono ramkę - zła suma kontrolna.");
-        return;
-    }
-
-    // --- KROK 2: Parsowanie nagłówka NMEA ---
-    int commaIdx[7];
-    int count = 0;
-    for (int i = 0; i < nmeaLine.length() && count < 7; i++) {
-        if (nmeaLine[i] == ',') commaIdx[count++] = i;
-    }
-    if (count < 6) return; 
-
-    int totalParts = nmeaLine.substring(commaIdx[0] + 1, commaIdx[1]).toInt();
-    int partNum    = nmeaLine.substring(commaIdx[1] + 1, commaIdx[2]).toInt();
-    int msgId      = nmeaLine.substring(commaIdx[2] + 1, commaIdx[3]).length() > 0 ? nmeaLine.substring(commaIdx[2] + 1, commaIdx[3]).toInt() : 0;
-    char channel   = nmeaLine.charAt(commaIdx[3] + 1); // Kanał 'A' lub 'B'
-    String payload = nmeaLine.substring(commaIdx[4] + 1, commaIdx[5]);
-
-    // --- KROK 3: Wybór obsługi ---
-    if (totalParts == 1) {
-        // [WIADOMOŚCI JEDNOCZĘŚCIOWE]
-        uint8_t msgType = getBits(payload.c_str(), 0, 6);
-
-        if (msgType >= 1 && msgType <= 3) decodeAIS_Type1(payload.c_str());
-        else if (msgType == 5)  decodeAIS_Type5(payload.c_str());
-        else if (msgType == 18) decodeAIS_Type18(payload.c_str());
-        else if (msgType == 24) decodeAIS_Type24(payload.c_str());
-    } 
-    else if (totalParts == 2) {
-        // [WIADOMOŚCI WIELOCZĘŚCIOWE - ZARZĄDZANIE BUFOREM]
-        unsigned long now = millis();
-
-        if (partNum == 1) {
-            // Szukamy wolnego slotu lub nadpisujemy stary (starszy niż 5 sekund)
-            int slot = -1;
-            for (int i = 0; i < MAX_BUFFERS; i++) {
-                if (mpBuffers[i].payload == "" || (now - mpBuffers[i].timestamp > 5000)) {
-                    slot = i; break;
-                }
-            }
-            if (slot != -1) {
-                mpBuffers[slot].msgId = msgId;
-                mpBuffers[slot].channel = channel;
-                mpBuffers[slot].payload = payload;
-                mpBuffers[slot].timestamp = now;
-            }
-        } 
-        else if (partNum == 2) {
-            // Szukamy pasującej pierwszej części
-            for (int i = 0; i < MAX_BUFFERS; i++) {
-                if (mpBuffers[i].msgId == msgId && mpBuffers[i].channel == channel && mpBuffers[i].payload != "") {
-                    
-                    String fullPayload = mpBuffers[i].payload + payload;
-                    uint8_t msgType = getBits(fullPayload.c_str(), 0, 6);
-                    
-                    if (msgType == 5) decodeAIS_Type5(fullPayload.c_str());
-                    // Tutaj można dodać inne długie wiadomości
-                    
-                    mpBuffers[i].payload = ""; // Czyścimy slot
-                    break;
-                }
-            }
+    void pushBits(uint32_t value, int numBits) {
+        for (int i = numBits - 1; i >= 0; i--) {
+            if ((value >> i) & 1)
+                payload[bitIndex / 8] |= (1 << (7 - (bitIndex % 8)));
+            bitIndex++;
         }
     }
-}
-
-// =========================================================================
-// DEKODER: Typ 1, 2, 3 (Pozycja - Klasa A)
-// =========================================================================
-void decodeAIS_Type1(const char* payload) {
-    long mmsi     = getBits(payload, 8, 30);
-    int navStatus = getBits(payload, 38, 4);
-    int rot       = getSignedBits(payload, 42, 8);
-    float sog     = getBits(payload, 50, 10) / 10.0f;
-    float lon     = getSignedBits(payload, 61, 28) / 600000.0f;
-    float lat     = getSignedBits(payload, 89, 27) / 600000.0f;
-    float cog     = getBits(payload, 116, 12) / 10.0f;
-    int heading   = getBits(payload, 128, 9);
-
-    Serial.printf("\n[AIS] Klasa A Pozycja (Typ 1/2/3)\n");
-    Serial.printf(" MMSI: %09ld | SOG: %.1f w | COG: %.1f st\n", mmsi, sog, cog);
-    Serial.printf(" Lat: %.6f | Lon: %.6f | HDG: %d\n", lat, lon, heading);
-}
-
-// =========================================================================
-// DEKODER: Typ 18 (Pozycja - Klasa B - Jachty, Motorówki)
-// =========================================================================
-void decodeAIS_Type18(const char* payload) {
-    long mmsi     = getBits(payload, 8, 30);
-    float sog     = getBits(payload, 46, 10) / 10.0f;
-    float lon     = getSignedBits(payload, 57, 28) / 600000.0f;
-    float lat     = getSignedBits(payload, 85, 27) / 600000.0f;
-    float cog     = getBits(payload, 112, 12) / 10.0f;
-    int heading   = getBits(payload, 124, 9);
-
-    Serial.printf("\n[AIS] Klasa B Pozycja (Typ 18)\n");
-    Serial.printf(" MMSI: %09ld | SOG: %.1f w | COG: %.1f st\n", mmsi, sog, cog);
-    Serial.printf(" Lat: %.6f | Lon: %.6f | HDG: %d\n", lat, lon, heading);
-}
-
-// =========================================================================
-// DEKODER: Typ 5 (Dane statyczne - Klasa A)
-// =========================================================================
-void decodeAIS_Type5(const char* payload) {
-    long mmsi       = getBits(payload, 8, 30);
-    long imo        = getBits(payload, 40, 30);
-    String callsign = getAisString(payload, 70, 7);
-    String shipName = getAisString(payload, 112, 20);
-    int shipType    = getBits(payload, 232, 8);
-    int dimA = getBits(payload, 240, 9);
-    int dimB = getBits(payload, 249, 9);
-    int dimC = getBits(payload, 258, 6);
-    int dimD = getBits(payload, 264, 6);
-    float draught   = getBits(payload, 270, 8) / 10.0f;
-
-    Serial.printf("\n[AIS] Klasa A Dane Statyczne (Typ 5)\n");
-    Serial.printf(" MMSI: %09ld | Nazwa: %s\n", mmsi, shipName.c_str());
-    Serial.printf(" Callsign: %s | IMO: %ld | Typ: %d\n", callsign.c_str(), imo, shipType);
-    Serial.printf(" Wymiary: %dx%d m | Zanurzenie: %.1f m\n", (dimA + dimB), (dimC + dimD), draught);
-}
-
-// =========================================================================
-// DEKODER: Typ 24 (Dane statyczne - Klasa A i B)
-// =========================================================================
-void decodeAIS_Type24(const char* payload) {
-    long mmsi = getBits(payload, 8, 30);
-    int partNumber = getBits(payload, 38, 2);
-
-    Serial.printf("\n[AIS] Dane Statyczne (Typ 24 - Część %c)\n", partNumber == 0 ? 'A' : 'B');
-    Serial.printf(" MMSI: %09ld\n", mmsi);
-
-    if (partNumber == 0) {
-        String shipName = getAisString(payload, 40, 20);
-        Serial.printf(" Nazwa: %s\n", shipName.c_str());
-    } 
-    else if (partNumber == 1) {
-        int shipType    = getBits(payload, 40, 8);
-        String callsign = getAisString(payload, 90, 7);
-        int dimA = getBits(payload, 132, 9);
-        int dimB = getBits(payload, 141, 9);
-        int dimC = getBits(payload, 150, 6);
-        int dimD = getBits(payload, 156, 6);
-
-        Serial.printf(" Callsign: %s | Typ: %d\n", callsign.c_str(), shipType);
-        Serial.printf(" Wymiary: %dx%d m\n", (dimA + dimB), (dimC + dimD));
+    void pushString(const char *str, int maxChars) {
+        for (int i = 0; i < maxChars; i++) {
+            char c = (i < (int)strlen(str)) ? str[i] : '@';
+            uint32_t val = 0;
+            if (c >= '@' && c <= '_') val = c - 0x40;
+            else if (c >= ' ' && c <= '?') val = c - 0x20 + 32;
+            pushBits(val, 6);
+        }
     }
+    void encodeToAscii(char *outputAscii, int &padding) {
+        int numChars = (bitIndex + 5) / 6;
+        padding = (numChars * 6) - bitIndex;
+        for (int i = 0; i < numChars; i++) {
+            uint8_t sixBits = 0;
+            for (int b = 0; b < 6; b++) {
+                int absBit = (i * 6) + b;
+                if (absBit < bitIndex && (payload[absBit / 8] & (1 << (7 - (absBit % 8))))) {
+                    sixBits |= (1 << (5 - b));
+                }
+            }
+            sixBits += 0x30;
+            if (sixBits > 0x57) sixBits += 0x08;
+            outputAscii[i] = sixBits;
+        }
+        outputAscii[numChars] = '\0';
+    }
+};
+
+void generateAIVDM(int mmsi, float lat, float lon, float sog, float cog, float heading, char *outputLine) {
+    FastAISBitWriter aisWriter;
+    int32_t i_lon = (int32_t)(lon * 600000.0);
+    int32_t i_lat = (int32_t)(lat * 600000.0);
+    uint32_t i_sog = (uint32_t)(sog * 10.0);
+    if (i_sog > 1022) i_sog = 1022;
+    uint32_t i_cog = (uint32_t)(cog * 10.0);
+    if (i_cog > 3599) i_cog = 3599;
+    uint32_t i_hdg = (uint32_t)heading;
+    if (heading > 359.0 || heading < 0.0) i_hdg = 511;
+
+    aisWriter.pushBits(1, 6);
+    aisWriter.pushBits(0, 2);
+    aisWriter.pushBits(mmsi, 30);
+    aisWriter.pushBits(0, 4);
+    aisWriter.pushBits(0, 8);
+    aisWriter.pushBits(i_sog, 10);
+    aisWriter.pushBits(0, 1);
+    aisWriter.pushBits(i_lon, 28);
+    aisWriter.pushBits(i_lat, 27);
+    aisWriter.pushBits(i_cog, 12);
+    aisWriter.pushBits(i_hdg, 9);
+    aisWriter.pushBits(60, 6);
+    aisWriter.pushBits(0, 2);
+    aisWriter.pushBits(0, 3);
+    aisWriter.pushBits(0, 1);
+    aisWriter.pushBits(0, 19);
+
+    char aisPayload[45];
+    int padding;
+    aisWriter.encodeToAscii(aisPayload, padding);
+    char baseLine[120];
+    sprintf(baseLine, "!AIVDM,1,1,,A,%s,%d", aisPayload, padding);
+    addNMEAChecksumToLine(baseLine, outputLine);
+}
+
+void generateType24A(int mmsi, const char *name, char *outputLine) {
+    FastAISBitWriter aisWriter;
+    aisWriter.pushBits(24, 6);
+    aisWriter.pushBits(0, 2);
+    aisWriter.pushBits(mmsi, 30);
+    aisWriter.pushBits(0, 2);
+    aisWriter.pushString(name, 20);
+    char aisPayload[40];
+    int padding;
+    aisWriter.encodeToAscii(aisPayload, padding);
+    char baseLine[100];
+    sprintf(baseLine, "!AIVDM,1,1,,A,%s,%d", aisPayload, padding);
+    addNMEAChecksumToLine(baseLine, outputLine);
+}
+
+void generateType24B(int mmsi, const char *callsign, uint8_t shipType, float length_m, float beam_m, char *outputLine) {
+    FastAISBitWriter aisWriter;
+    aisWriter.pushBits(24, 6);
+    aisWriter.pushBits(0, 2);
+    aisWriter.pushBits(mmsi, 30);
+    aisWriter.pushBits(1, 2);
+    aisWriter.pushBits(shipType, 8);
+    aisWriter.pushBits(0, 42);
+    aisWriter.pushString(callsign, 7);
+
+    uint32_t dimA = (uint32_t)(length_m * 0.1f);
+    uint32_t dimB = 0;
+    uint32_t dimC = (uint32_t)(beam_m * 0.1f / 2);
+    uint32_t dimD = dimC;
+
+    aisWriter.pushBits(dimA, 9);
+    aisWriter.pushBits(dimB, 9);
+    aisWriter.pushBits(dimC, 6);
+    aisWriter.pushBits(dimD, 6);
+    aisWriter.pushBits(0, 6);
+
+    char aisPayload[45];
+    int padding;
+    aisWriter.encodeToAscii(aisPayload, padding);
+    char baseLine[120];
+    sprintf(baseLine, "!AIVDM,1,1,,A,%s,%d", aisPayload, padding);
+    addNMEAChecksumToLine(baseLine, outputLine);
+}
+
+// --- 3c. LOGIKA DYNAMICZNA AIS (Inne Statki + Kolizje) ---
+// --- 3c-1. LOGIKA DECYZYJNA POJEDYNCZEGO CELU AIS (Unikanie kolizji + Fizyka) ---
+void processAisTargetBehavior(Target &target, float yachtLat, float yachtLon,
+                              float yachtSog, float yachtCog, bool yachtEng,
+                              int interval)
+{
+  unsigned long nowMs = millis();
+
+  // --- Obliczenia geometryczne ---
+  float dx = (yachtLon - target.lon) * cosf(yachtLat * PI / 180.0);
+  float dy = yachtLat - target.lat;
+  float dist_nm = sqrtf(dx * dx + dy * dy) * 60.0;
+
+  float bearing_to_jacht = atan2(dx, dy) * 180.0 / PI;
+  if (bearing_to_jacht < 0)
+    bearing_to_jacht += 360.0;
+
+  bool borderRisk = (dist_nm > target.max_radius_nm);
+  unsigned long timeSinceLastDecision = nowMs - target.lastCourseDecision;
+
+  // --- RYBAK (ID 3) ---
+  if (target.id == 3)
+  {
+    if (borderRisk)
+      target.is_returning = true;
+    else if (dist_nm <= 1.0)
+      target.is_returning = false;
+
+    if (target.is_returning)
+    {
+      target.sog = target.max_sog;
+      if (timeSinceLastDecision > 5000)
+      {
+        target.target_cog = bearing_to_jacht;
+        target.lastCourseDecision = nowMs;
+        if (config.log_level >= 2) {
+          char ts[24];
+          getTimestamp(ts, sizeof(ts));
+          Serial.printf("%s [AIS DEBUG] %s wraca do strefy.\n", ts, target.name);
+        }
+      }
+    }
+    else
+    {
+      target.sog = 0.0;
+    }
+  }
+  else
+  {
+    // --- PROM / TANKOWIEC ---
+    if (borderRisk)
+    {
+      target.sog = target.max_sog;
+      if (timeSinceLastDecision > 15000)
+      {
+        target.target_cog = bearing_to_jacht + random(-20, 21);
+        target.planned_cog = target.target_cog;
+        target.is_avoiding = false;
+        target.lastCourseDecision = nowMs;
+      }
+    }
+    else
+    {
+      bool arpa_alarm = checkCollisionRisk_ARPA(yachtLat, yachtLon, yachtSog, yachtCog,
+                                                target.lat, target.lon, target.sog, target.cog);
+
+      bool i_am_give_way = false;
+      if (arpa_alarm)
+      {
+        float rel = bearing_to_jacht - target.cog;
+        while (rel > 180)
+          rel -= 360;
+        while (rel < -180)
+          rel += 360;
+
+        if (fabsf(rel) < 15.0f)
+          i_am_give_way = true;
+        else if (fabsf(rel) < 112.5f)
+          i_am_give_way = (!yachtEng) || (rel > 0);
+        else
+          i_am_give_way = true;
+      }
+
+      if (arpa_alarm && i_am_give_way && !target.is_avoiding)
+      {
+        target.planned_cog = target.target_cog;
+        target.is_avoiding = true;
+        if (config.log_level >= 2)
+        {
+          char ts[24];
+          getTimestamp(ts, sizeof(ts));
+          Serial.printf("%s [AIS COLREG] %s – START unikania\n", ts, target.name);
+        }
+      }
+
+      if (target.is_avoiding)
+      {
+        float parallel_cog = yachtCog + 180.0f;
+        if (parallel_cog >= 360.0f)
+          parallel_cog -= 360.0f;
+        target.target_cog = parallel_cog;
+
+        if (target.sog < target.base_sog)
+        {
+          target.sog += 1.2f;
+          if (target.sog > target.base_sog)
+            target.sog = target.base_sog;
+        }
+
+        float rel = bearing_to_jacht - target.cog;
+        while (rel > 180)
+          rel -= 360;
+        while (rel < -180)
+          rel += 360;
+
+        bool pastAndClear = (fabsf(rel) > 110.0f && dist_nm > 1.3f) || (dist_nm > 4.0f);
+
+        if (pastAndClear)
+        {
+          target.target_cog = target.planned_cog;
+          target.is_avoiding = false;
+          if (config.log_level >= 2)
+          {
+            char ts[24];
+            getTimestamp(ts, sizeof(ts));
+            Serial.printf("%s [AIS COLREG] %s – Past & Clear → wraca na kurs %.0f°\n",
+                          ts, target.name, target.planned_cog);
+          }
+        }
+      }
+      else
+      {
+        if (target.sog < target.base_sog)
+          target.sog = target.base_sog;
+
+        if (timeSinceLastDecision > 90000)
+        {
+          target.target_cog = target.planned_cog + random(-22, 23);
+          target.planned_cog = target.target_cog;
+          target.lastCourseDecision = nowMs;
+        }
+      }
+    }
+  }
+
+  // --- RUCH CELOW (zawsze na końcu) ---
+  // 1. TWORZYMY KOPIĘ BEZPIECZEŃSTWA (przed obliczeniami)
+  float safe_lat = target.lat;
+  float safe_lon = target.lon;
+  float safe_sog = target.sog;
+  float safe_cog = target.cog;
+
+  // 2. FIZYKA SKRĘTU I RUCHU
+  float diff = target.target_cog - target.cog;
+  if (diff > 180.0)
+    diff -= 360.0;
+  if (diff < -180.0)
+    diff += 360.0;
+
+  float turn = constrain(diff, -target.max_turn_rate, target.max_turn_rate) * interval;
+  target.cog += turn;
+
+  float d = (target.sog / 3600.0) * interval;
+  target.lat += (d * cosf(target.cog * PI / 180.0)) / 60.0f;
+  target.lon += (d * sinf(target.cog * PI / 180.0)) / (60.0f * cosf(target.lat * PI / 180.0));
+
+  // 3. INTELIGENTNY OCHRONIARZ (Rollback w razie NaN)
+  if (isnan(target.lat) || isnan(target.lon))
+  {
+    Serial.printf("[BŁĄD FIZYKI AIS] Wykryto NaN dla celu: %s! Cofam krok symulacji.\n", target.name);
+
+    // Przywracamy statek na miejsce sprzed ułamka sekundy
+    target.lat = safe_lat;
+    target.lon = safe_lon;
+
+    // Zatrzymujemy statek, aby nie wpadł w pętlę błędów z dużą prędkością
+    target.sog = 0.0;
+
+    // Odbijamy kurs o 1 stopień, by uciec z "martwego punktu matematycznego"
+    target.cog = safe_cog + 1.0f;
+    if (target.cog >= 360.0f)
+      target.cog -= 360.0f;
+  }
+}
+
+// --- 3c-2. GŁÓWNA PĘTLA AIS ---
+void updateAisTargetsAndSentences(char *pack, int &offset, const YachtState &snap)
+{
+
+  float step_interval = 1.0f;
+
+  for (int i = 0; i < 3; i++)
+  {
+    // Wywołanie wydzielonej logiki
+    processAisTargetBehavior(targets[i], snap.lat, snap.lon, snap.sog, snap.cog, snap.engine_on, step_interval);
+
+    // Generowanie ramki NMEA po aktualizacji
+    char finalLine[160];
+    int mmsi = 261000000 + targets[i].id;
+    float current_hdg = targets[i].cog;
+
+    if (targets[i].id == 3 && targets[i].sog < 0.5)
+      current_hdg = 511.0;
+
+    generateAIVDM(mmsi, targets[i].lat, targets[i].lon, targets[i].sog, targets[i].cog, current_hdg, finalLine);
+    safeAppend(pack, offset, NMEA_BUFFER_SIZE, finalLine);
+  }
 }

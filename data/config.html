@@ -23,10 +23,18 @@
 </div>
 <div class='card'>
   <h3>Ustawienia transmisji (Zapisywane automatycznie)</h3>
-  <label><input type='checkbox' id='chk_u' onchange='updateSettings()'> Włącz UDP</label><br>
-  <label><input type='checkbox' id='chk_t' onchange='updateSettings()'> Włącz TCP</label><br>
-  <label><input type='checkbox' id='chk_d' onchange='updateSettings()'> Włącz DEBUG</label><br><br>
-  Interwał wysyłania: <input type='number' id='in_i' min='1' max='10' value='1' style='width:80px' onchange='updateSettings()'> sekund
+  <label><input type='checkbox' id='chk_u' onchange='updateSettings()'> NMEA0183 UDP</label><br>
+  <label><input type='checkbox' id='chk_t' onchange='updateSettings()'> NMEA0183 TCP</label><br>
+  <label><input type='checkbox' id='chk_sk' onchange='updateSettings()'> SignalK (WS port 80)</label><br>
+  <label>Poziom logowania Serial:
+    <select id='sel_log' onchange='updateSettings()' style='padding:5px; background:#3a3a3a; color:white; border-radius:4px;'>
+      <option value='0'>0: Brak (NONE)</option>
+      <option value='1'>1: Podstawowy (BASIC)</option>
+      <option value='2'>2: Zaawansowany (ADVANCED)</option>
+      <option value='3'>3: Ekspercki (EXPERT)</option>
+      <option value='4'>4: Full (All)</option>
+    </select>
+  </label><br><br>
 </div>
 <button class='btn red' onclick="window.location='/'">Powrót do Mostka</button>
 
@@ -47,9 +55,9 @@ function selectNetwork(ssid) { document.getElementById('ssid').value = ssid; }
 function updateSettings() {
   const u = document.getElementById('chk_u').checked ? 1 : 0;
   const t = document.getElementById('chk_t').checked ? 1 : 0;
-  const d = document.getElementById('chk_d').checked ? 1 : 0;
-  const i = document.getElementById('in_i').value || 1;
-  fetch(`/settings?u=${u}&t=${t}&d=${d}&i=${i}`);
+  const d = document.getElementById('sel_log').value;
+  const sk = document.getElementById('chk_sk').checked ? 1 : 0;
+  fetch(`/settings?u=${u}&t=${t}&d=${d}&sk=${sk}`);
 }
 
 // ZMIENIONA FUNKCJA: Wysyła tylko dane WiFi
@@ -77,8 +85,8 @@ window.onload = () => {
   fetch('/data').then(r=>r.json()).then(d => {
     document.getElementById('chk_u').checked = d.u;
     document.getElementById('chk_t').checked = d.t;
-    document.getElementById('chk_d').checked = d.d;
-    document.getElementById('in_i').value = d.i || 1;
+    document.getElementById('sel_log').value = d.d;
+    document.getElementById('chk_sk').checked = d.sk;
   });
 };
 </script>

@@ -6,9 +6,18 @@
   .btn{padding:15px 5px; border-radius:5px; border:none; color:white; cursor:pointer; font-weight:bold; margin:3px; user-select: none; -webkit-user-select: none;}
   .blue{background:#007BFF;} .red{background:#dc3545;} .green{background:#28a745;} .mag{background:#d63384;}
   .slider{width: 100%; margin-top:10px;}
+  /* Styl dla przełącznika (Switch) */
+  .switch {position: relative; display: inline-block; width: 60px; height: 34px; vertical-align: middle; margin-right: 10px;}
+  .switch input {opacity: 0; width: 0; height: 0;}
+  .slider-sw {position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 34px;}
+  .slider-sw:before {position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%;}
+  input:checked + .slider-sw {background-color: #28a745;}
+  input:focus + .slider-sw {box-shadow: 0 0 1px #28a745;}
+  input:checked + .slider-sw:before {transform: translateX(26px);}
+  .label-text {font-size: 18px; font-weight: bold; vertical-align: middle;}
 </style></head>
 <body><h2>Mostek Kapitański</h2>
-<p><button class='btn blue' style='margin:10px;padding:10px 20px;' onclick="window.location='/config'">⚙️ KONFIGURACJA WIFI</button></p>
+<p><button class='btn blue' style='margin:10px;padding:10px 20px;' onclick="window.location='/config'">⚙️ KONFIGURACJA </button></p>
 <div class='card'>
   <h3>COG: <span id='c'>--</span>&deg;</h3>
   <h4 style='color:#aaa; margin-top:-10px; margin-bottom:15px;'>SOG: <span id='s'>--</span> kn (Cel: <span id='ts'>--</span> kn)</h4>
@@ -18,6 +27,14 @@
   <button class='btn mag' style='width:60px;' onclick="sendCmd('NAV')">NAV</button>
   <button class='btn green' style='width:45px;' onclick="sendCmd('R1')">+1&deg;</button>
   <button class='btn green' style='width:50px;' onclick="sendCmd('R10')">+10&deg;</button>
+
+  <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #444;">
+    <label class="switch">
+      <input type="checkbox" id="skipper_sw" onchange="toggleSkipper()">
+      <span class="slider-sw"></span>
+    </label>
+    <span class="label-text">WIRTUALNY SKIPPER AI</span>
+  </div>
 </div>
 <div class='card'>
   <h3>Silnik: <span id='rpm_disp'>0</span> RPM</h3>
@@ -25,6 +42,11 @@
   Moc: <input type='range' id='rpm_sld' min='900' max='4000' value='900' class='slider' onchange='sndEng()' oninput="updateRpmDisp()">
 </div><br>
 <div class='card'><h3>Autopilot: <span id='nav_stat'>--</span></h3></div>
+<div class='card'>
+  <h3>Warunki pogodowe</h3>
+  <p>Wiatr rzeczywisty (TWS): <span id="tws" class="wind-val">--</span> kn</p>
+  <p>Kierunek wiatru (TWD): <span id="twd" class="wind-val">--</span>&deg;</p>
+</div>
 
 <script>
   let ws;
@@ -44,14 +66,26 @@
       // BLOKADA "GUMKI": Aktualizujemy ekran danymi z serwera tylko, 
       // jeśli użytkownik przez ostatnie 800ms niczego nie klikał.
       if (timeSinceInteraction > 800) {  
-        document.getElementById('c').innerText = d.c.toFixed(1);
+        if (d.c !== undefined) document.getElementById('c').innerText = d.c.toFixed(1);
         
         // NOWE: Aktualizacja wyświetlania SOG i Target SOG
         if (d.s !== undefined) document.getElementById('s').innerText = d.s.toFixed(1);
         if (d.ts !== undefined) document.getElementById('ts').innerText = d.ts.toFixed(1);
 
-        document.getElementById('nav_stat').innerText = (d.n ? 'AKTYWNY' : 'STANDBY');
-          
+        // Rozróżnienie statusu: Skipper AI vs Autopilot vs Standby
+        let navStat = 'STANDBY';
+        if (d.sai === 1) navStat = 'SKIPPER AI';
+        else if (d.n === 1) navStat = 'AKTYWNY';
+        
+        const navElem = document.getElementById('nav_stat');
+        navElem.innerText = navStat;
+        navElem.style.color = (d.sai === 1) ? '#00d4ff' : (d.n ? '#d63384' : '#aaa');
+        
+        // Aktualizacja stanu Skippera i Wiatru
+        if (d.sai !== undefined) document.getElementById('skipper_sw').checked = (d.sai === 1);
+        if (d.tws !== undefined) document.getElementById('tws').innerText = d.tws.toFixed(1);
+        if (d.twd !== undefined) document.getElementById('twd').innerText = d.twd.toFixed(0);
+
         if (d.e === 1) {           
           eng_sw.checked = true;          
           disp.innerText = Math.round(d.r);
@@ -91,36 +125,36 @@
         if (currentCog >= 360) currentCog -= 360;
         
         if (cmd !== 'NAV') {
-           cSpan.innerText = currentCog.toFixed(1);
+           document.getElementById('c').innerText = currentCog.toFixed(1);
            document.getElementById('nav_stat').innerText = 'STANDBY';
-        } else {
-           let stat = document.getElementById('nav_stat');
-           stat.innerText = (stat.innerText === 'AKTYWNY') ? 'STANDBY' : 'AKTYWNY';
+           document.getElementById('nav_stat').style.color = '#aaa';
         }
       }
     }
+  }
+
+  function toggleSkipper() {
+    lastUserInteraction = Date.now();
+    fetch('/skipper').then(r => console.log("Skipper toggled"));
   }
 
   // Funkcja optycznego odświeżania suwaka (żeby cyferki zmieniały się podczas przesuwania)
   function updateRpmDisp() {
     lastUserInteraction = Date.now();
     const checked = document.getElementById('eng_sw').checked;
-    document.getElementById('rpm_disp').innerText = checked ? document.getElementById('rpm_sld').value : '0';
+    const slider = document.getElementById('rpm_sld');
+    document.getElementById('rpm_disp').innerText = checked ? slider.value : '0';
   }
 
   function sndEng() {
     lastUserInteraction = Date.now();
     const checked = document.getElementById('eng_sw').checked;
-    const slider  = document.getElementById('rpm_sld');
+    const slider = document.getElementById('rpm_sld');
     const st = checked ? 1 : 0;
-    let r = slider.value;
-    
-    if (!checked) {
-      r = 900;
-      slider.value = 900;
+    const rpm = slider.value;
+    if(ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(`ENG:${st}:${rpm}`);
     }
-    document.getElementById('rpm_disp').innerText = checked ? r : '0';
-    ws.send(`ENG:${st}:${r}`);
   }
 
   window.onload = initWebSocket;
