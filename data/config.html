@@ -1,0 +1,96 @@
+<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>
+<title>Configuration</title>
+<style>
+  body{font-family:Arial;background:#1e1e1e;color:#ddd;text-align:center;}
+  .card{background:#2d2d2d;padding:25px;border-radius:12px;margin:15px auto;max-width:460px;}
+  .btn{padding:12px 28px;margin:10px;border:none;border-radius:6px;color:white;font-weight:bold;cursor:pointer;font-size:16px;}
+  .blue{background:#007BFF;}.green{background:#28a745;}.red{background:#dc3545;}
+  input[type=text],input[type=password]{width:100%;padding:12px;margin:8px 0;border-radius:6px;border:1px solid #555;background:#3a3a3a;color:white;}
+  label{font-size:17px;margin:8px 0;display:block;}
+  table{width:100%;border-collapse:collapse;margin:15px 0;}
+  th,td{padding:10px;text-align:left;border-bottom:1px solid #444;}
+</style>
+</head><body>
+<h2>⚙️ Simulator Configuration</h2>
+<div class='card'>
+  <h3>WiFi Connection</h3>
+  <button class='btn blue' onclick='scanWiFi()'>Scan WiFi Networks</button>
+  <div id='networks' style='margin-top:15px;'></div>
+  <label>Selected SSID:</label><input type='text' id='ssid' placeholder='SSID' readonly>
+  <label>Password:</label><input type='password' id='password' placeholder='WiFi Password'>
+  <label><input type='checkbox' id='ap_chk'> Enable Access Point mode</label>
+  <button class='btn green' style='width:100%; margin: 15px 0 0 0;' onclick='saveWiFi()'>SAVE WIFI & RESTART</button>
+</div>
+<div class='card'>
+  <h3>Transmission Settings (Autosave)</h3>
+  <label><input type='checkbox' id='chk_u' onchange='updateSettings()'> NMEA0183 UDP</label><br>
+  <label><input type='checkbox' id='chk_t' onchange='updateSettings()'> NMEA0183 TCP</label><br>
+  <label><input type='checkbox' id='chk_sk' onchange='updateSettings()'> SignalK (WS port 80)</label><br>
+   <label><input type='checkbox' id='chk_n2k' onchange='updateSettings()'> NMEA2000 (CAN)</label><br>
+  <label>Serial Log Level:
+    <select id='sel_log' onchange='updateSettings()' style='padding:5px; background:#3a3a3a; color:white; border-radius:4px;'>
+      <option value='0'>0: None</option>
+      <option value='1'>1: Basic</option>
+      <option value='2'>2: Detailed</option>
+      <option value='3'>3: Expert</option>
+      <option value='4'>4: Full (All)</option>
+    </select>
+  </label><br><br>
+</div>
+<button class='btn red' onclick="window.location='/'">Return to Bridge</button>
+
+<script>
+function scanWiFi() {
+  fetch('/scan').then(r => r.json()).then(networks => {
+    let html = "<table><tr><th>SSID</th><th>Signal</th><th></th></tr>";
+    networks.forEach(net => {
+      html += `<tr><td>${net.ssid}</td><td>${net.rssi} dBm</td><td><button onclick="selectNetwork('${net.ssid}')">Select</button></td></tr>`;
+    });
+    html += "</table>";
+    document.getElementById('networks').innerHTML = html;
+  });
+}
+function selectNetwork(ssid) { document.getElementById('ssid').value = ssid; }
+
+// NOWA FUNKCJA: Błyskawiczny zapis ustawień w tle
+function updateSettings() {
+  const u = document.getElementById('chk_u').checked ? 1 : 0;
+  const t = document.getElementById('chk_t').checked ? 1 : 0;
+  const d = document.getElementById('sel_log').value;
+  const sk = document.getElementById('chk_sk').checked ? 1 : 0;
+  const n2k = document.getElementById('chk_n2k').checked ? 1 : 0;
+  fetch(`/settings?u=${u}&t=${t}&d=${d}&sk=${sk}&n2k=${n2k}`);
+}
+
+// ZMIENIONA FUNKCJA: Wysyła tylko dane WiFi
+function saveWiFi() {
+  fetch('/saveconfig', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      ssid: document.getElementById('ssid').value,
+      pass: document.getElementById('password').value,
+      ap: document.getElementById('ap_chk').checked
+    })
+  })
+  .then(response => response.text())
+  .then(text => {
+    alert(text);
+    if (text.includes("restart")) {
+      setTimeout(() => location.href = '/', 4000);
+    }
+  })
+  .catch(err => alert("Save error: " + err));
+}
+
+window.onload = () => {
+  fetch('/data').then(r=>r.json()).then(d => {
+    document.getElementById('chk_u').checked = d.u;
+    document.getElementById('chk_t').checked = d.t;
+    document.getElementById('sel_log').value = d.d;
+    document.getElementById('chk_sk').checked = d.sk;
+    document.getElementById('chk_n2k').checked = d.n2k;
+  });
+};
+</script>
+</body></html>
